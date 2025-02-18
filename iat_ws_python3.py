@@ -1,26 +1,4 @@
-# -*- coding:utf-8 -*-
-#
-#   author: iflytek
-#
-#  本demo测试时运行的环境为：Windows + Python3.7
-#  本demo测试成功运行时所安装的第三方库及其版本如下，您可自行逐一或者复制到一个新的txt文件利用pip一次性安装：
-#   cffi==1.12.3
-#   gevent==1.4.0
-#   greenlet==0.4.15
-#   pycparser==2.19
-#   six==1.12.0
-#   websocket==0.2.1
-#   websocket-client==0.56.0
-#
-#  语音听写流式 WebAPI 接口调用示例 接口文档（必看）：https://doc.xfyun.cn/rest_api/语音听写（流式版）.html
-#  webapi 听写服务参考帖子（必看）：http://bbs.xfyun.cn/forum.php?mod=viewthread&tid=38947&extra=
-#  语音听写流式WebAPI 服务，热词使用方式：登陆开放平台https://www.xfyun.cn/后，找到控制台--我的应用---语音听写（流式）---服务管理--个性化热词，
-#  设置热词
-#  注意：热词只能在识别的时候会增加热词的识别权重，需要注意的是增加相应词条的识别率，但并不是绝对的，具体效果以您测试为准。
-#  语音听写流式WebAPI 服务，方言试用方法：登陆开放平台https://www.xfyun.cn/后，找到控制台--我的应用---语音听写（流式）---服务管理--识别语种列表
-#  可添加语种或方言，添加后会显示该方言的参数值
-#  错误码链接：https://www.xfyun.cn/document/error-code （code返回错误码时必看）
-# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+#本语音听写程序基于科大讯飞接口demo改进而来
 import websocket
 import datetime
 import hashlib
@@ -35,7 +13,7 @@ from datetime import datetime
 from time import mktime
 import _thread as thread
 import subprocess
-import sys
+
 
 STATUS_FIRST_FRAME = 0  # 第一帧的标识
 STATUS_CONTINUE_FRAME = 1  # 中间帧标识
@@ -53,7 +31,7 @@ class Ws_Param(object):
         # 公共参数(common)
         self.CommonArgs = {"app_id": self.APPID}
         # 业务参数(business)，更多个性化参数可在官网查看
-        self.BusinessArgs = {"domain": "iat", "language": "zh_cn", "accent": "mandarin", "vinfo": 1, "vad_eos": 10000}
+        self.BusinessArgs = {"domain": "iat", "language": "zh_cn", "accent": "mandarin", "vinfo":1,"vad_eos":10000}
 
     # 生成url
     def create_url(self):
@@ -82,11 +60,16 @@ class Ws_Param(object):
         }
         # 拼接鉴权参数，生成url
         url = url + '?' + urlencode(v)
+        # print("date: ",date)
+        # print("v: ",v)
+        # 此处打印出建立连接时候的url,参考本demo的时候可取消上方打印的注释，比对相同参数时生成的url与自己代码生成的url是否一致
+        # print('websocket url :', url)
         return url
 
 
 # 收到websocket消息的处理
 def on_message(ws, message):
+    #每次识别前先清空result.txt
     try:
         code = json.loads(message)["code"]
         sid = json.loads(message)["sid"]
@@ -102,13 +85,14 @@ def on_message(ws, message):
                     result += w["w"]  # 提取 "w" 字段的值并拼接
 
             #print("提取的文本: ", result)  # 输出最终的文本结果
-
             # 将识别结果追加到 result.txt 文件中
             with open('./result.txt', 'a+', encoding='utf-8') as f:
                 f.write(result)
+            print(result)
 
     except Exception as e:
         print("receive msg,but parse exception:", e)
+
 
 
 # 收到websocket错误的处理
@@ -117,7 +101,7 @@ def on_error(ws, error):
 
 
 # 收到websocket关闭的处理
-def on_close(ws, a, b):
+def on_close(ws,a,b):
     print("### closed ###")
 
 
@@ -167,40 +151,31 @@ def on_open(ws):
 
     thread.start_new_thread(run, ())
 
+#定义函数检查调用模型值
+def model_type():
+    #读取model.txt来选择调用的模型
+    with open('./model/model.txt', 'r', encoding='utf-8') as f:
+        model = f.read()
+        return model
 
 if __name__ == "__main__":
-    # 检查命令行参数
-    if len(sys.argv) < 3:
-        print("请提供模型类型参数: local 或 remote")
-        sys.exit(1)
-
-    audio_path=sys.argv[1]
-    model_type=sys.argv[2]
-    if model_type not in ["local", "remote"]:
-        print("模型类型参数错误，请使用 'local' 或 'remote'")
-        sys.exit(1)
-
-    # 将文本内容清除
+    #每次识别前先清空result.txt文本
     with open('./result.txt', 'w', encoding='utf-8') as f:
-        f.write("")
-
+        f.truncate()
     # 测试时候在此处正确填写相关信息即可运行
     time1 = datetime.now()
-    wsParam = Ws_Param(APPID='71efdd04', APISecret='NmUxNTczMzQyMjYxZTcwYTdlOGMyZjUy',
-                       APIKey='e63cbab297110bc8d29c9ede6565bbe1',
-                       AudioFile=audio_path)
+    wsParam = Ws_Param(APPID='', APISecret='',
+                       APIKey='',
+                       AudioFile=r'./upload_audio/output.wav')
     websocket.enableTrace(False)
     wsUrl = wsParam.create_url()
     ws = websocket.WebSocketApp(wsUrl, on_message=on_message, on_error=on_error, on_close=on_close)
     ws.on_open = on_open
     ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
     time2 = datetime.now()
-    print(time2 - time1)
-
-    # 根据模型类型调用不同的脚本
-    if model_type == "local":
-        #print("调用本地模型...")
-        subprocess.call(['python', 'Local_LLM.py'])
-    elif model_type == "remote":
-        #print("调用远程模型...")
-        subprocess.call(['python', 'Remote_LLM.py'])
+    # print(time2-time1)
+    model = model_type()
+    if model == 'localhost':
+        subprocess.run(['python','localhost.py'])
+    elif model == 'utral':
+        subprocess.run(['python','utral.py'])
