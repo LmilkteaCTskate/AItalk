@@ -1,3 +1,4 @@
+import io
 import pyaudio
 import wave
 import keyboard
@@ -20,6 +21,7 @@ import _thread as thread
 import requests
 import re
 import queue
+import pyttsx3
 
 # 全局配置
 FORMAT = pyaudio.paInt16
@@ -188,6 +190,7 @@ class VoiceAssistant:
         self.root = tk.Tk()
         self.root.withdraw()
         self.selected_model = tk.StringVar(value='localhost')
+        self.selected_tts = tk.StringVar(value='xfyun')  
         self.is_recording = False
         self.recording_lock = threading.Lock()
         self.start_time = None
@@ -197,6 +200,7 @@ class VoiceAssistant:
         self.asr_text = tk.StringVar()
         self.response_text = tk.StringVar()
         
+        self.engine = pyttsx3.init()  # 初始化本地语音引擎
         self.check_queue()
 
     def check_queue(self):
@@ -324,39 +328,102 @@ class VoiceAssistant:
             return f"星火模型错误: {str(e)}"
 
     def start_tts(self, text):
+        """根据选择调用不同的TTS引擎"""
+        if self.selected_tts.get() == 'xfyun':
+            self.use_xfyun_tts(text)
+        else:
+            self.use_local_tts(text)
+
+    def use_xfyun_tts(self, text):
         def tts_task():
             try:
                 tts_ws = TTSWebSocket(text)
                 audio_data = tts_ws.run()
                 self.task_queue.put(lambda: self.finalize_response(text, audio_data))
             except Exception as e:
-                print(f"语音合成失败: {e}")
+                print(f"讯飞语音合成失败: {e}")
+        threading.Thread(target=tts_task, daemon=True).start()
+
+    def use_local_tts(self, text):
+        def tts_task():
+            try:
+                # 生成临时音频文件路径
+                temp_file = os.path.join(RECORD_DIR, "temp_tts.wav")
+                
+                # 配置本地引擎参数
+                self.engine.setProperty('rate', 200)  # 语速
+                self.engine.setProperty('volume', 1.0)  # 音量 0-1
+                
+                # 保存到临时文件
+                self.engine.save_to_file(text, temp_file)
+                self.engine.runAndWait()  # 阻塞直到生成完成
+                
+                # 读取音频数据
+                with open(temp_file, 'rb') as f:
+                    audio_data = f.read()
+                
+                # 更新界面并播放
+                self.task_queue.put(lambda: self.finalize_response(text, audio_data))
+                
+            except Exception as e:
+                print(f"本地语音合成失败: {e}")
+                self.task_queue.put(lambda: self.response_text.set(f"语音合成失败: {str(e)}"))
         
         threading.Thread(target=tts_task, daemon=True).start()
 
     def finalize_response(self, text, audio_data):
-        """同时更新界面和播放语音"""
+        """统一处理语音播放"""
         self.response_text.set(text)
-        self.play_audio(audio_data)
+        if self.selected_tts.get() == 'local':
+            self.play_local_audio(audio_data)
+        else:
+            self.play_xfyun_audio(audio_data)  # 使用专门方法播放RAW数据
 
-    def play_audio(self, audio_data):
+    def play_local_audio(self, audio_data):
+        """播放WAV格式音频"""
         def play_thread():
             try:
+                # 使用pyaudio播放WAV数据
+                with wave.open(io.BytesIO(audio_data)) as wf:
+                    stream = self.audio_player.open(
+                        format=self.audio_player.get_format_from_width(wf.getsampwidth()),
+                        channels=wf.getnchannels(),
+                        rate=wf.getframerate(),
+                        output=True
+                    )
+                    data = wf.readframes(1024)
+                    while data:
+                        stream.write(data)
+                        data = wf.readframes(1024)
+                    stream.stop_stream()
+                    stream.close()
+            except Exception as e:
+                print(f"本地音频播放失败: {e}")
+        
+        threading.Thread(target=play_thread, daemon=True).start()
+
+    def play_xfyun_audio(self, audio_data):
+        """播放讯飞返回的RAW格式音频"""
+        def play_thread():
+            try:
+                # 直接使用PCM参数播放
                 stream = self.audio_player.open(
                     format=pyaudio.paInt16,
-                    channels=1,
-                    rate=16000,
+                    channels=1,  # 单声道
+                    rate=16000,  # 采样率
                     output=True
                 )
-                stream.write(audio_data)
+                # 分块写入音频数据
+                chunk_size = 1024
+                for i in range(0, len(audio_data), chunk_size):
+                    stream.write(audio_data[i:i+chunk_size])
                 stream.stop_stream()
                 stream.close()
             except Exception as e:
-                print(f"播放失败: {e}")
-    
-        # 在独立线程中播放音频
+                print(f"讯飞音频播放失败: {e}")
+        
         threading.Thread(target=play_thread, daemon=True).start()
-
+    
     def create_gui(self):
         self.root.deiconify()
         self.root.title('智能语音助手')
@@ -378,11 +445,19 @@ class VoiceAssistant:
         response_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         ttk.Label(response_frame, textvariable=self.response_text, wraplength=450).pack(padx=10, pady=5, fill=tk.BOTH)
         
+        # 在模型选择后添加TTS引擎选择
+        tts_frame = ttk.LabelFrame(main_frame, text="语音合成引擎")
+        tts_frame.pack(fill=tk.X, pady=5)
+        ttk.Radiobutton(tts_frame, text="讯飞语音", variable=self.selected_tts, value='xfyun').pack(side=tk.LEFT, padx=10)
+        ttk.Radiobutton(tts_frame, text="本地合成", variable=self.selected_tts, value='local').pack(side=tk.LEFT, padx=10)
+
         status_frame = ttk.Frame(main_frame)
         status_frame.pack(fill=tk.X, pady=5)
         self.status_label = ttk.Label(status_frame, text="按住空格键开始录音")
         self.status_label.pack(side=tk.LEFT)
-        
+
+
+
         self.update_status()
         self.root.mainloop()
 
