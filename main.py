@@ -189,7 +189,7 @@ class VoiceAssistant:
     def __init__(self):
         self.root = tk.Tk()
         self.root.withdraw()
-        self.selected_model = tk.StringVar(value='localhost')
+        self.selected_model = tk.StringVar(value='localhost')  # 默认选择
         self.selected_tts = tk.StringVar(value='xfyun')  
         self.is_recording = False
         self.recording_lock = threading.Lock()
@@ -423,43 +423,98 @@ class VoiceAssistant:
                 print(f"讯飞音频播放失败: {e}")
         
         threading.Thread(target=play_thread, daemon=True).start()
-    
-    def create_gui(self):
-        self.root.deiconify()
-        self.root.title('智能语音助手')
-        self.root.geometry('500x300')
-        
+
+    def on_model_select(self, event):
+        # 根据用户选择的中文值，获取对应的英文值
+        selected_text = self.model_combobox.get()
+        for key, value in self.model_options.items():
+            if value == selected_text:
+                self.selected_model.set(key)  # 设置实际值
+                break
+
+    def on_tts_select(self, event):
+        # 根据用户选择的中文值，获取对应的英文值
+        selected_text = self.tts_combobox.get()
+        for key, value in self.tts_options.items():
+            if value == selected_text:
+                self.selected_tts.set(key)  # 设置实际值
+                break
+
+    def use_model_tts_gui(self):
+
         main_frame = ttk.Frame(self.root, padding=10)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame.pack(fill=tk.X, pady=5)
+
+        # 模型选择
+        model_select = ttk.LabelFrame(main_frame, text="模型选择")
+        model_select.pack(side=tk.LEFT, padx=(0,5))
+        self.model_options = {
+            "localhost":"本地模型", 
+            "utral":"星火模型"
+            }
+        self.model_combobox = ttk.Combobox(
+            model_select, textvariable=self.selected_model, 
+        values=list(self.model_options.values()), state="readonly"
+        )
+        self.model_combobox.pack(side=tk.LEFT, padx=(0,10))
+        # 绑定事件，当用户选择时，将中文值映射回英文值
+        self.model_combobox.bind("<<ComboboxSelected>>", self.on_model_select)
+
+        # TTS引擎选择
+        tts_select = ttk.LabelFrame(main_frame, text="TTS选择")
+        tts_select.pack(side=tk.LEFT, padx=(5,0))
+        self.tts_options = {
+            "local":"本地语音合成",
+            "xfyun":"讯飞语音"
+            }
+        self.tts_combobox = ttk.Combobox(
+            tts_select, textvariable=self.selected_tts,
+        values=list(self.tts_options.values()), state="readonly"
+        )
+        self.tts_combobox.pack(side=tk.LEFT, padx=(0,10))
+
+        self.model_combobox.bind("<<ComboboxSelected>>", self.on_tts_select)
         
-        model_frame = ttk.LabelFrame(main_frame, text="模型选择")
-        model_frame.pack(fill=tk.X, pady=5)
-        for model in ["localhost", "utral"]:
-            ttk.Radiobutton(model_frame, text=model, variable=self.selected_model, value=model).pack(side=tk.LEFT, padx=10)
+        self.model_combobox.current(0)  # 设置默认选中第一项
+        self.tts_combobox.current(0)    # 设置默认选中第一项
+
+    def model_tts_result(self):
+        # 语音识别结果和模型回复
+        result_frame = ttk.Frame(self.root, padding=10)
+        result_frame.pack(fill=tk.BOTH, expand=True)
         
-        asr_frame = ttk.LabelFrame(main_frame, text="语音识别结果")
+        # 语音识别结果
+        asr_frame = ttk.LabelFrame(result_frame, text="语音识别结果")
         asr_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         ttk.Label(asr_frame, textvariable=self.asr_text, wraplength=450).pack(padx=10, pady=5, fill=tk.BOTH)
         
-        response_frame = ttk.LabelFrame(main_frame, text="模型回复")
+        # 模型回复
+        response_frame = ttk.LabelFrame(result_frame, text="模型回复")
         response_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         ttk.Label(response_frame, textvariable=self.response_text, wraplength=450).pack(padx=10, pady=5, fill=tk.BOTH)
-        
-        # 在模型选择后添加TTS引擎选择
-        tts_frame = ttk.LabelFrame(main_frame, text="语音合成引擎")
-        tts_frame.pack(fill=tk.X, pady=5)
-        ttk.Radiobutton(tts_frame, text="讯飞语音", variable=self.selected_tts, value='xfyun').pack(side=tk.LEFT, padx=10)
-        ttk.Radiobutton(tts_frame, text="本地合成", variable=self.selected_tts, value='local').pack(side=tk.LEFT, padx=10)
+            
 
-        status_frame = ttk.Frame(main_frame)
+    def create_gui(self):
+        self.root.deiconify()
+        self.root.title('智能语音助手')
+        self.root.geometry('800x500')
+        
+        # 模型选择和 TTS 引擎选择
+        self.use_model_tts_gui()
+        
+        # 语音识别结果和模型回复
+        self.model_tts_result()
+
+        recorder_frame = ttk.Frame(self.root, padding=10)
+        recorder_frame.pack(fill=tk.BOTH, expand=True)
+        status_frame = ttk.Frame(recorder_frame)
         status_frame.pack(fill=tk.X, pady=5)
         self.status_label = ttk.Label(status_frame, text="按住空格键开始录音")
         self.status_label.pack(side=tk.LEFT)
 
-
-
         self.update_status()
         self.root.mainloop()
+
 
     def update_status(self):
         if self.root.winfo_exists():
