@@ -5,7 +5,7 @@ import keyboard
 import os
 import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, filedialog
 import threading
 import websocket
 import json
@@ -22,6 +22,8 @@ import requests
 import re
 import queue
 import pyttsx3
+import torch
+import torchaudio
 
 # 全局配置
 FORMAT = pyaudio.paInt16
@@ -41,6 +43,7 @@ XF_API_SECRET = 'NmUxNTczMzQyMjYxZTcwYTdlOGMyZjUy'
 os.makedirs(RECORD_DIR, exist_ok=True)
 
 class ASRWebSocket:
+    """讯飞语音听写WebSocket客户端"""
     def __init__(self, audio_file, update_callback):
         self.audio_file = audio_file
         self.update_callback = update_callback
@@ -59,16 +62,11 @@ class ASRWebSocket:
         except Exception as e:
             print(f"ASR Message Error: {e}")
 
-    def run(self):
-        websocket.enableTrace(False)
-        ws = websocket.WebSocketApp(
-            self.ws_param.create_url(),
-            on_message=self.on_message,
-            on_error=lambda ws, error: print(f"ASR Error: {error}"),
-            on_close=lambda ws, a, b: print("ASR Closed")
-        )
-        ws.on_open = self.on_open
-        ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
+    def on_error(self, ws, error):
+        print(f"ASR Error: {error}")
+
+    def on_close(self, ws, close_status_code, close_msg):
+        print("ASR Closed")
 
     def on_open(self, ws):
         def run(*args):
@@ -101,7 +99,19 @@ class ASRWebSocket:
             ws.close()
         thread.start_new_thread(run, ())
 
+    def run(self):
+        websocket.enableTrace(False)
+        ws = websocket.WebSocketApp(
+            self.ws_param.create_url(),
+            on_message=self.on_message,
+            on_error=self.on_error,
+            on_close=self.on_close
+        )
+        ws.on_open = self.on_open
+        ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
+
 class TTSWebSocket:
+    """讯飞语音合成WebSocket客户端"""
     def __init__(self, text):
         self.text = text
         self.ws_param = WsParamTTS(XF_APP_ID, XF_API_KEY, XF_API_SECRET, text)
@@ -119,18 +129,12 @@ class TTSWebSocket:
         except Exception as e:
             print(f"TTS Message Error: {e}")
 
-    def run(self):
-        websocket.enableTrace(False)
-        ws = websocket.WebSocketApp(
-            self.ws_param.create_url(),
-            on_message=self.on_message,
-            on_error=lambda ws, error: print(f"TTS Error: {error}"),
-            on_close=self.on_close
-        )
-        ws.on_open = lambda ws: self.on_open(ws)
-        ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
-        self.websocket_closed.wait()  # 等待连接完全关闭
-        return bytes(self.audio_data)
+    def on_error(self, ws, error):
+        print(f"TTS Error: {error}")
+
+    def on_close(self, ws, close_status_code, close_msg):
+        print("TTS Closed")
+        self.websocket_closed.set()
 
     def on_open(self, ws):
         data = {
@@ -140,23 +144,39 @@ class TTSWebSocket:
         }
         ws.send(json.dumps(data))
 
-    def on_close(self, ws, close_status_code, close_msg):
-        print("TTS Closed")
-        self.websocket_closed.set()
+    def run(self):
+        websocket.enableTrace(False)
+        ws = websocket.WebSocketApp(
+            self.ws_param.create_url(),
+            on_message=self.on_message,
+            on_error=self.on_error,
+            on_close=self.on_close
+        )
+        ws.on_open = self.on_open
+        ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
+        self.websocket_closed.wait()
+        return bytes(self.audio_data)
 
 class WsParam:
+    """讯飞听写参数生成器"""
     def __init__(self, APPID, APIKey, APISecret, AudioFile):
         self.APPID = APPID
         self.APIKey = APIKey
         self.APISecret = APISecret
         self.AudioFile = AudioFile
         self.CommonArgs = {"app_id": self.APPID}
-        self.BusinessArgs = {"domain": "iat", "language": "zh_cn", "accent": "mandarin", "vinfo": 1, "vad_eos": 10000}
+        self.BusinessArgs = {
+            "domain": "iat",
+            "language": "zh_cn",
+            "accent": "mandarin",
+            "vinfo": 1,
+            "vad_eos": 10000
+        }
 
     def create_url(self):
         now = datetime.now()
         date = format_date_time(mktime(now.timetuple()))
-        signature_origin = f"host: ws-api.xfyun.cn\ndate: {date}\nGET /v2/iat HTTP/1.1"
+        signature_origin = "host: ws-api.xfyun.cn\ndate: {}\nGET /v2/iat HTTP/1.1".format(date)
         signature_sha = hmac.new(self.APISecret.encode(), signature_origin.encode(), hashlib.sha256).digest()
         signature = base64.b64encode(signature_sha).decode()
         authorization = base64.b64encode(
@@ -165,19 +185,28 @@ class WsParam:
         return f"wss://ws-api.xfyun.cn/v2/iat?{urlencode({'authorization': authorization, 'date': date, 'host': 'ws-api.xfyun.cn'})}"
 
 class WsParamTTS:
+    """讯飞语音合成参数生成器"""
     def __init__(self, APPID, APIKey, APISecret, Text):
         self.APPID = APPID
         self.APIKey = APIKey
         self.APISecret = APISecret
         self.Text = Text
         self.CommonArgs = {"app_id": self.APPID}
-        self.BusinessArgs = {"aue": "raw", "auf": "audio/L16;rate=16000", "vcn": "aisjiuxu", "tte": "utf8"}
-        self.Data = {"status": 2, "text": base64.b64encode(self.Text.encode()).decode()}
+        self.BusinessArgs = {
+            "aue": "raw",
+            "auf": "audio/L16;rate=16000",
+            "vcn": "aisjiuxu",
+            "tte": "utf8"
+        }
+        self.Data = {
+            "status": 2,
+            "text": base64.b64encode(self.Text.encode()).decode()
+        }
 
     def create_url(self):
         now = datetime.now()
         date = format_date_time(mktime(now.timetuple()))
-        signature_origin = f"host: ws-api.xfyun.cn\ndate: {date}\nGET /v2/tts HTTP/1.1"
+        signature_origin = "host: ws-api.xfyun.cn\ndate: {}\nGET /v2/tts HTTP/1.1".format(date)
         signature_sha = hmac.new(self.APISecret.encode(), signature_origin.encode(), hashlib.sha256).digest()
         signature = base64.b64encode(signature_sha).decode()
         authorization = base64.b64encode(
@@ -185,39 +214,181 @@ class WsParamTTS:
         ).decode()
         return f"wss://tts-api.xfyun.cn/v2/tts?{urlencode({'authorization': authorization, 'date': date, 'host': 'ws-api.xfyun.cn'})}"
 
+class LocalASRProcessor:
+    """本地语音识别处理器"""
+    def __init__(self, model_path):
+        self.model = torch.jit.load(model_path)
+        self.model.eval()
+        self.resample = torchaudio.transforms.Resample(orig_freq=16000, new_freq=16000)
+        self.vocab = ["<pad>", "<unk>"] + [chr(i) for i in range(ord('a'), ord('z')+1)] + [" ", "'", "<eos>"]
+        
+    def process_audio(self, file_path):
+        waveform, sample_rate = torchaudio.load(file_path)
+        if sample_rate != 16000:
+            waveform = torchaudio.transforms.Resample(sample_rate, 16000)(waveform)
+        return waveform.unsqueeze(0)
+    
+    def transcribe(self, waveform):
+        with torch.no_grad():
+            outputs = self.model(waveform)
+        return self.decode_output(outputs[0])
+    
+    def decode_output(self, outputs):
+        tokens = torch.argmax(outputs, dim=-1)
+        return "".join([self.vocab[t] for t in tokens.tolist() if t < len(self.vocab)]).replace("<eos>", "")
+
 class VoiceAssistant:
+    """主应用程序类"""
     def __init__(self):
         self.root = tk.Tk()
         self.root.withdraw()
-        self.selected_model = tk.StringVar(value='localhost')  # 默认选择
-        self.selected_tts = tk.StringVar(value='xfyun')  
+        
+        # 状态变量
+        self.selected_model = tk.StringVar(value='localhost')
+        self.selected_tts = tk.StringVar(value='xfyun')
+        self.selected_asr = tk.StringVar(value='xfyun')
+        self.local_asr_model_path = tk.StringVar()
         self.is_recording = False
         self.recording_lock = threading.Lock()
         self.start_time = None
+        
+        # 音频设备
         self.audio_player = pyaudio.PyAudio()
         self.task_queue = queue.Queue()
         
+        # 文本显示
         self.asr_text = tk.StringVar()
         self.response_text = tk.StringVar()
         
-        self.engine = pyttsx3.init()  # 初始化本地语音引擎
+        # 本地引擎
+        self.engine = pyttsx3.init()
         self.check_queue()
+        
+        # 配置选项
+        self.model_options = {
+            "localhost": "本地模型", 
+            "utral": "星火模型"
+        }
+        self.tts_options = {
+            "local": "本地语音合成",
+            "xfyun": "讯飞语音"
+        }
+        self.asr_options = {
+            "xfyun": "讯飞听写",
+            "local": "本地ASR模型"
+        }
 
-    def check_queue(self):
-        try:
-            while True:
-                task = self.task_queue.get_nowait()
-                task()
-        except queue.Empty:
-            pass
-        finally:
-            self.root.after(100, self.check_queue)
+    # GUI相关方法
+    def create_gui(self):
+        self.root.deiconify()
+        self.root.title('智能语音助手 v2.0')
+        self.root.geometry('900x600')
+        
+        # 控制面板
+        control_frame = ttk.Frame(self.root, padding=10)
+        control_frame.pack(fill=tk.X)
+        
+        # 模型选择
+        model_frame = self.create_select_frame(control_frame, "AI模型", self.model_options, self.selected_model)
+        model_frame.pack(side=tk.LEFT, padx=5)
+        
+        # ASR选择
+        asr_frame = ttk.LabelFrame(control_frame, text="语音识别")
+        asr_frame.pack(side=tk.LEFT, padx=5)
+        self.create_asr_controls(asr_frame)
+        
+        # TTS选择
+        tts_frame = self.create_select_frame(control_frame, "语音合成", self.tts_options, self.selected_tts)
+        tts_frame.pack(side=tk.LEFT, padx=5)
+        
+        # 结果显示
+        result_frame = ttk.Frame(self.root)
+        result_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.create_result_panels(result_frame)
+        
+        # 状态栏
+        status_frame = ttk.Frame(self.root)
+        status_frame.pack(fill=tk.X, padx=10, pady=5)
+        self.status_label = ttk.Label(status_frame, text="按住空格键开始录音")
+        self.status_label.pack()
+        
+        self.root.after(100, self.update_status)
+        self.root.mainloop()
 
+    def create_select_frame(self, parent, title, options, variable):
+        frame = ttk.LabelFrame(parent, text=title)
+        combobox = ttk.Combobox(
+            frame, 
+            textvariable=variable,
+            values=list(options.values()),
+            state="readonly",
+            width=12
+        )
+        combobox.current(0)
+        combobox.pack()
+        combobox.bind("<<ComboboxSelected>>", lambda e: self.on_combo_select(e, options))
+        return frame
+
+    def create_asr_controls(self, parent):
+        self.asr_combobox = ttk.Combobox(
+            parent,
+            textvariable=self.selected_asr,
+            values=list(self.asr_options.values()),
+            state="readonly",
+            width=12
+        )
+        self.asr_combobox.current(0)
+        self.asr_combobox.pack(side=tk.LEFT)
+        self.asr_combobox.bind("<<ComboboxSelected>>", self.on_asr_select)
+        
+        ttk.Button(parent, text="选择模型", command=self.select_asr_model).pack(side=tk.LEFT, padx=5)
+        ttk.Label(parent, textvariable=self.local_asr_model_path, width=30).pack(side=tk.LEFT)
+
+    def create_result_panels(self, parent):
+        # 语音识别结果
+        asr_result_frame = ttk.LabelFrame(parent, text="识别结果")
+        asr_result_frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(asr_result_frame, textvariable=self.asr_text, wraplength=800).pack(padx=10, pady=5)
+        
+        # 模型回复
+        response_frame = ttk.LabelFrame(parent, text="AI回复")
+        response_frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(response_frame, textvariable=self.response_text, wraplength=800).pack(padx=10, pady=5)
+
+    # 事件处理
+    def on_combo_select(self, event, options):
+        widget = event.widget
+        selected_text = widget.get()
+        for key, value in options.items():
+            if value == selected_text:
+                getattr(self, f'selected_{widget.master["text"].lower().replace(" ", "_")}').set(key)
+                break
+
+    def on_asr_select(self, event):
+        selected_text = self.asr_combobox.get()
+        for key, value in self.asr_options.items():
+            if value == selected_text:
+                self.selected_asr.set(key)
+                break
+
+    def select_asr_model(self):
+        if self.selected_asr.get() == 'local':
+            path = filedialog.askopenfilename(filetypes=[("模型文件", "*.pt *.pth")])
+            if path:
+                self.local_asr_model_path.set(path)
+
+    # 核心功能
     def record_audio(self):
         while True:
             filename = os.path.join(RECORD_DIR, "output.wav")
             p = pyaudio.PyAudio()
-            stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
+            stream = p.open(
+                format=FORMAT,
+                channels=CHANNELS,
+                rate=RATE,
+                input=True,
+                frames_per_buffer=CHUNK
+            )
             
             try:
                 frames = []
@@ -255,23 +426,41 @@ class VoiceAssistant:
                 time.sleep(1)
 
     def run_asr(self, audio_file):
-    # 开始新识别时清空显示
         self.task_queue.put(lambda: self.asr_text.set(""))
-        with open('./result.txt', 'w') as f:
-            f.truncate()
         
-        asr_ws = ASRWebSocket(audio_file, lambda text: self.task_queue.put(lambda: self.update_asr_display(text)))
-        asr_ws.run()
-        
-        with open('./result.txt', 'r', encoding='utf-8') as f:
-            text = f.read().strip()
-        
-        if text:
-            self.task_queue.put(lambda: self.process_response(text))
+        if self.selected_asr.get() == 'xfyun':
+            asr_ws = ASRWebSocket(audio_file, self.update_asr_callback)
+            asr_ws.run()
+        else:
+            threading.Thread(
+                target=self.run_local_asr,
+                args=(audio_file,),
+                daemon=True
+            ).start()
 
-    def update_asr_display(self, text):
+    def run_local_asr(self, audio_file):
+        try:
+            if not os.path.exists(self.local_asr_model_path.get()):
+                raise FileNotFoundError("ASR模型文件不存在")
+            
+            processor = LocalASRProcessor(self.local_asr_model_path.get())
+            waveform = processor.process_audio(audio_file)
+            text = processor.transcribe(waveform)
+            
+            self.task_queue.put(lambda: self.asr_text.set(text))
+            self.task_queue.put(lambda: self.process_response(text))
+            
+        except Exception as e:
+            self.task_queue.put(
+                lambda: self.asr_text.set(f"ASR错误: {str(e)}")
+            )
+
+    def update_asr_callback(self, text):
         current = self.asr_text.get()
-        self.asr_text.set(current + text)
+        self.task_queue.put(lambda: self.asr_text.set(current + text))
+        
+        if text.endswith(('。', '！', '？')):
+            self.task_queue.put(lambda: self.process_response(current + text))
 
     def process_response(self, text):
         model = self.selected_model.get()
@@ -289,7 +478,6 @@ class VoiceAssistant:
             print(f"处理响应失败: {e}")
 
     def clean_response(self, text):
-        # 多重过滤确保去除所有标签
         text = re.sub(r'<script.*?</script>', '', text, flags=re.DOTALL)
         text = re.sub(r'<style.*?</style>', '', text, flags=re.DOTALL)
         text = re.sub(r'<.*?>', '', text)
@@ -328,7 +516,6 @@ class VoiceAssistant:
             return f"星火模型错误: {str(e)}"
 
     def start_tts(self, text):
-        """根据选择调用不同的TTS引擎"""
         if self.selected_tts.get() == 'xfyun':
             self.use_xfyun_tts(text)
         else:
@@ -347,22 +534,15 @@ class VoiceAssistant:
     def use_local_tts(self, text):
         def tts_task():
             try:
-                # 生成临时音频文件路径
                 temp_file = os.path.join(RECORD_DIR, "temp_tts.wav")
-                
-                # 配置本地引擎参数
-                self.engine.setProperty('rate', 200)  # 语速
-                self.engine.setProperty('volume', 1.0)  # 音量 0-1
-                
-                # 保存到临时文件
+                self.engine.setProperty('rate', 200)
+                self.engine.setProperty('volume', 1.0)
                 self.engine.save_to_file(text, temp_file)
-                self.engine.runAndWait()  # 阻塞直到生成完成
+                self.engine.runAndWait()
                 
-                # 读取音频数据
                 with open(temp_file, 'rb') as f:
                     audio_data = f.read()
                 
-                # 更新界面并播放
                 self.task_queue.put(lambda: self.finalize_response(text, audio_data))
                 
             except Exception as e:
@@ -372,18 +552,15 @@ class VoiceAssistant:
         threading.Thread(target=tts_task, daemon=True).start()
 
     def finalize_response(self, text, audio_data):
-        """统一处理语音播放"""
         self.response_text.set(text)
         if self.selected_tts.get() == 'local':
             self.play_local_audio(audio_data)
         else:
-            self.play_xfyun_audio(audio_data)  # 使用专门方法播放RAW数据
+            self.play_xfyun_audio(audio_data)
 
     def play_local_audio(self, audio_data):
-        """播放WAV格式音频"""
         def play_thread():
             try:
-                # 使用pyaudio播放WAV数据
                 with wave.open(io.BytesIO(audio_data)) as wf:
                     stream = self.audio_player.open(
                         format=self.audio_player.get_format_from_width(wf.getsampwidth()),
@@ -403,17 +580,14 @@ class VoiceAssistant:
         threading.Thread(target=play_thread, daemon=True).start()
 
     def play_xfyun_audio(self, audio_data):
-        """播放讯飞返回的RAW格式音频"""
         def play_thread():
             try:
-                # 直接使用PCM参数播放
                 stream = self.audio_player.open(
                     format=pyaudio.paInt16,
-                    channels=1,  # 单声道
-                    rate=16000,  # 采样率
+                    channels=1,
+                    rate=16000,
                     output=True
                 )
-                # 分块写入音频数据
                 chunk_size = 1024
                 for i in range(0, len(audio_data), chunk_size):
                     stream.write(audio_data[i:i+chunk_size])
@@ -424,108 +598,24 @@ class VoiceAssistant:
         
         threading.Thread(target=play_thread, daemon=True).start()
 
-    def on_model_select(self, event):
-        # 根据用户选择的中文值，获取对应的英文值
-        selected_text = self.model_combobox.get()
-        for key, value in self.model_options.items():
-            if value == selected_text:
-                self.selected_model.set(key)  # 设置实际值
-                break
-
-    def on_tts_select(self, event):
-        # 根据用户选择的中文值，获取对应的英文值
-        selected_text = self.tts_combobox.get()
-        for key, value in self.tts_options.items():
-            if value == selected_text:
-                self.selected_tts.set(key)  # 设置实际值
-                break
-
-    def use_model_tts_gui(self):
-
-        main_frame = ttk.Frame(self.root, padding=10)
-        main_frame.pack(fill=tk.X, pady=5)
-
-        # 模型选择
-        model_select = ttk.LabelFrame(main_frame, text="模型选择")
-        model_select.pack(side=tk.LEFT, padx=(0,5))
-        self.model_options = {
-            "localhost":"本地模型", 
-            "utral":"星火模型"
-            }
-        self.model_combobox = ttk.Combobox(
-            model_select, textvariable=self.selected_model, 
-        values=list(self.model_options.values()), state="readonly"
-        )
-        self.model_combobox.pack(side=tk.LEFT, padx=(0,10))
-        # 绑定事件，当用户选择时，将中文值映射回英文值
-        self.model_combobox.bind("<<ComboboxSelected>>", self.on_model_select)
-
-        # TTS引擎选择
-        tts_select = ttk.LabelFrame(main_frame, text="TTS选择")
-        tts_select.pack(side=tk.LEFT, padx=(5,0))
-        self.tts_options = {
-            "local":"本地语音合成",
-            "xfyun":"讯飞语音"
-            }
-        self.tts_combobox = ttk.Combobox(
-            tts_select, textvariable=self.selected_tts,
-        values=list(self.tts_options.values()), state="readonly"
-        )
-        self.tts_combobox.pack(side=tk.LEFT, padx=(0,10))
-
-        self.model_combobox.bind("<<ComboboxSelected>>", self.on_tts_select)
-        
-        self.model_combobox.current(0)  # 设置默认选中第一项
-        self.tts_combobox.current(0)    # 设置默认选中第一项
-
-    def model_tts_result(self):
-        # 语音识别结果和模型回复
-        result_frame = ttk.Frame(self.root, padding=10)
-        result_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # 语音识别结果
-        asr_frame = ttk.LabelFrame(result_frame, text="语音识别结果")
-        asr_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        ttk.Label(asr_frame, textvariable=self.asr_text, wraplength=450).pack(padx=10, pady=5, fill=tk.BOTH)
-        
-        # 模型回复
-        response_frame = ttk.LabelFrame(result_frame, text="模型回复")
-        response_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        ttk.Label(response_frame, textvariable=self.response_text, wraplength=450).pack(padx=10, pady=5, fill=tk.BOTH)
-            
-
-    def create_gui(self):
-        self.root.deiconify()
-        self.root.title('智能语音助手')
-        self.root.geometry('800x500')
-        
-        # 模型选择和 TTS 引擎选择
-        self.use_model_tts_gui()
-        
-        # 语音识别结果和模型回复
-        self.model_tts_result()
-
-        recorder_frame = ttk.Frame(self.root, padding=10)
-        recorder_frame.pack(fill=tk.BOTH, expand=True)
-        status_frame = ttk.Frame(recorder_frame)
-        status_frame.pack(fill=tk.X, pady=5)
-        self.status_label = ttk.Label(status_frame, text="按住空格键开始录音")
-        self.status_label.pack(side=tk.LEFT)
-
-        self.update_status()
-        self.root.mainloop()
-
+    # 辅助方法
+    def check_queue(self):
+        try:
+            while True:
+                task = self.task_queue.get_nowait()
+                task()
+        except queue.Empty:
+            pass
+        finally:
+            self.root.after(100, self.check_queue)
 
     def update_status(self):
-        if self.root.winfo_exists():
-            if self.is_recording:
-                duration = int(time.time() - self.start_time)
-                status = f"录音中... 时长: {duration}秒"
-            else:
-                status = "按住空格键开始录音"
-            
-            self.status_label.config(text=status)
-            self.root.after(100, self.update_status)
+        if self.is_recording:
+            duration = int(time.time() - self.start_time)
+            self.status_label.config(text=f"录音中... 时长: {duration}秒")
+        else:
+            self.status_label.config(text="按住空格键开始录音")
+        self.root.after(100, self.update_status)
 
 if __name__ == "__main__":
     assistant = VoiceAssistant()
